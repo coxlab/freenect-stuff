@@ -55,6 +55,8 @@ char **g_argv;
 
 int window;
 
+
+// TODO!!!
 #define GPIO_FILENAME "/Users/davidcox/tmp/gpio1"
 #define DATA_DIR "/Users/davidcox/tmp/kinect_data"
 
