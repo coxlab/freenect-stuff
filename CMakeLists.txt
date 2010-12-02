@@ -102,6 +102,7 @@ add_subdirectory (src)
 # Add examples
 IF(BUILD_EXAMPLES)
   add_subdirectory (examples)
+  add_subdirectory (coxlab_examples)
 ENDIF()
 
 IF(BUILD_FAKENECT)
