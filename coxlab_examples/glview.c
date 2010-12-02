@@ -43,6 +43,8 @@
 #include <GL/glu.h>
 #endif
 
+#include <sys/stat.h>
+
 #include <math.h>
 
 pthread_t freenect_thread;
@@ -53,6 +55,25 @@ char **g_argv;
 
 int window;
 
+#define GPIO_FILENAME "/Users/davidcox/tmp/gpio1"
+#define DATA_DIR "/Users/davidcox/tmp/kinect_data"
+
+char data_dir[1024];
+
+typedef int bool;
+FILE *gpio_file;
+
+bool acquire_flag = 0;
+#define MIN_FRAMES_BETWEEN_ACQ   10
+int acquire_countdown = 0;
+int acquired_frame_number = 0;
+bool acquired_rgb = 0;
+bool acquired_depth = 0;
+
+#define RGB_FILE_STEM "rgb_"
+#define DEPTH_FILE_STEM "depth_"
+
+pthread_mutex_t acquire_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gl_backbuf_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // back: owned by libfreenect (implicit for depth)
@@ -66,7 +87,7 @@ GLuint gl_rgb_tex;
 
 freenect_context *f_ctx;
 freenect_device *f_dev;
-int freenect_angle = 0;
+int freenect_angle = -30;
 int freenect_led;
 
 freenect_video_format requested_format = FREENECT_VIDEO_RGB;
@@ -75,6 +96,8 @@ freenect_video_format current_format = FREENECT_VIDEO_RGB;
 pthread_cond_t gl_frame_cond = PTHREAD_COND_INITIALIZER;
 int got_rgb = 0;
 int got_depth = 0;
+
+
 
 void DrawGLScene()
 {
@@ -138,6 +161,97 @@ void DrawGLScene()
 
 	glutSwapBuffers();
 }
+
+
+
+bool initGPIO(){
+  gpio_file = fopen(GPIO_FILENAME, "r");
+  return 1;
+}
+
+bool closeGPIO(){
+  
+  fclose(gpio_file);
+  return 1;
+}
+
+bool pollGPIO(){
+
+  char result;
+  
+  initGPIO();
+  fseek(gpio_file, 0, 0);
+  fread(&result, sizeof(char), 1, gpio_file);
+  closeGPIO();
+  
+  if(result == '0'){
+    return 0;
+  } else {
+    return 1;
+  }
+  
+}
+
+void acquireFrame(){
+  
+  printf("Acquiring frame %d\n", acquired_frame_number++);
+  acquire_countdown = MIN_FRAMES_BETWEEN_ACQ;
+  
+  pthread_mutex_lock(&acquire_mutex);
+  acquired_rgb = 0;
+  acquired_depth = 0;
+	pthread_mutex_unlock(&acquire_mutex);
+}
+
+
+void saveRGBFrame(uint8_t *frame){
+  char filename[512];
+  sprintf(filename, "%s/%s%d.dat", data_dir, RGB_FILE_STEM, acquired_frame_number);
+  
+  printf("Saving %s\n", filename);
+  
+  FILE *rgb_file = fopen(filename, "w");
+  fwrite((void *)frame, 1, 640*480*3, rgb_file);
+  fclose(rgb_file);
+  
+  pthread_mutex_lock(&acquire_mutex);
+  acquired_rgb = 1;
+	pthread_mutex_unlock(&acquire_mutex);
+}
+
+void saveDepthFrame(uint8_t *frame){
+  char filename[512];
+  sprintf(filename, "%s/%s%d.dat", data_dir, DEPTH_FILE_STEM, acquired_frame_number);
+  
+  printf("Saving %s\n", filename);  
+  
+  FILE *depth_file = fopen(filename, "w");
+  fwrite((void *)frame, 1, 640*480*3, depth_file);
+  fclose(depth_file);
+  
+  pthread_mutex_lock(&acquire_mutex);
+  acquired_depth = 1;
+	pthread_mutex_unlock(&acquire_mutex);
+}
+
+
+void Idle(){
+
+  bool trigger = 0;
+  
+  
+  if(acquire_countdown <= 0){
+    trigger = pollGPIO();
+  }
+  
+  if(trigger){
+    acquireFrame();
+  }
+  
+  fflush(stdout);
+  DrawGLScene();
+}
+
 
 void keyPressed(unsigned char key, int x, int y)
 {
@@ -239,7 +353,7 @@ void *gl_threadfunc(void *arg)
 	window = glutCreateWindow("LibFreenect");
 
 	glutDisplayFunc(&DrawGLScene);
-	glutIdleFunc(&DrawGLScene);
+	glutIdleFunc(&Idle);
 	glutReshapeFunc(&ReSizeGLScene);
 	glutKeyboardFunc(&keyPressed);
 
@@ -257,7 +371,14 @@ void depth_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
 	int i;
 	uint16_t *depth = v_depth;
 
+  bool local_acquire_flag = 0;
+  pthread_mutex_lock(&acquire_mutex);
+  local_acquire_flag = !acquired_depth;
+	pthread_mutex_unlock(&acquire_mutex);
+
 	pthread_mutex_lock(&gl_backbuf_mutex);
+
+
 	for (i=0; i<FREENECT_FRAME_PIX; i++) {
 		int pval = t_gamma[depth[i]];
 		int lb = pval & 0xff;
@@ -300,23 +421,43 @@ void depth_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
 		}
 	}
 	got_depth++;
+	
+	if(local_acquire_flag){
+    saveDepthFrame(depth_mid);
+	}
+	
 	pthread_cond_signal(&gl_frame_cond);
 	pthread_mutex_unlock(&gl_backbuf_mutex);
 }
 
 void rgb_cb(freenect_device *dev, void *rgb, uint32_t timestamp)
 {
-	pthread_mutex_lock(&gl_backbuf_mutex);
+  bool local_acquire_flag = 0;
+  	
+  pthread_mutex_lock(&acquire_mutex);
+  local_acquire_flag = !acquired_rgb;
+	pthread_mutex_unlock(&acquire_mutex);
+  
+  pthread_mutex_lock(&gl_backbuf_mutex);
 
 	// swap buffers
 	assert (rgb_back == rgb);
 	rgb_back = rgb_mid;
 	freenect_set_video_buffer(dev, rgb_back);
+	
+	if(local_acquire_flag){
+    saveRGBFrame(rgb_back);
+	}
+	
 	rgb_mid = rgb;
 
 	got_rgb++;
 	pthread_cond_signal(&gl_frame_cond);
 	pthread_mutex_unlock(&gl_backbuf_mutex);
+	
+	if(acquire_countdown){
+    acquire_countdown--;
+	}
 }
 
 void *freenect_threadfunc(void *arg)
@@ -332,7 +473,7 @@ void *freenect_threadfunc(void *arg)
 	freenect_start_depth(f_dev);
 	freenect_start_video(f_dev);
 
-	printf("'w'-tilt up, 's'-level, 'x'-tilt down, '0'-'6'-select LED mode, 'f'-video format\n");
+	//printf("'w'-tilt up, 's'-level, 'x'-tilt down, '0'-'6'-select LED mode, 'f'-video format\n");
 
 	while (!die && freenect_process_events(f_ctx) >= 0) {
 		freenect_raw_tilt_state* state;
@@ -340,8 +481,8 @@ void *freenect_threadfunc(void *arg)
 		state = freenect_get_tilt_state(f_dev);
 		double dx,dy,dz;
 		freenect_get_mks_accel(state, &dx, &dy, &dz);
-		printf("\r raw acceleration: %4d %4d %4d  mks acceleration: %4f %4f %4f", state->accelerometer_x, state->accelerometer_y, state->accelerometer_z, dx, dy, dz);
-		fflush(stdout);
+		//printf("\r raw acceleration: %4d %4d %4d  mks acceleration: %4f %4f %4f", state->accelerometer_x, state->accelerometer_y, state->accelerometer_z, dx, dy, dz);
+		//fflush(stdout);
 
 		if (requested_format != current_format) {
 			freenect_stop_video(f_dev);
@@ -366,6 +507,22 @@ void *freenect_threadfunc(void *arg)
 int main(int argc, char **argv)
 {
 	int res;
+
+  //initGPIO();
+  bool pin = pollGPIO();
+  printf("GPIO pin = %d\n", pin);
+
+  int data_dir_number = 0;
+  sprintf(data_dir, "%s/%d", DATA_DIR, data_dir_number);
+  struct stat st;
+  while(stat(data_dir,&st) == 0){
+    data_dir_number++;
+    sprintf(data_dir, "%s/%d", DATA_DIR, data_dir_number);
+  }
+  
+  mkdir(data_dir, S_IREAD | S_IWRITE | S_IEXEC);
+  
+  printf("Data dir is: %s\n", data_dir);
 
 	depth_mid = malloc(640*480*3);
 	depth_front = malloc(640*480*3);
@@ -399,7 +556,7 @@ int main(int argc, char **argv)
 	if (argc > 1)
 		user_device_number = atoi(argv[1]);
 
-	if (nr_devices < 1)
+if (nr_devices < 1)
 		return 1;
 
 	if (freenect_open_device(f_ctx, &f_dev, user_device_number) < 0) {
@@ -412,9 +569,11 @@ int main(int argc, char **argv)
 		printf("pthread_create failed\n");
 		return 1;
 	}
-
+	
 	// OS X requires GLUT to run on the main thread
 	gl_threadfunc(NULL);
+	
+  //closeGPIO();
 
 	return 0;
 }
