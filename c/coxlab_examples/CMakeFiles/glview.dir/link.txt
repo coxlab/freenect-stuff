@@ -1,0 +1,1 @@
+/usr/bin/gcc  -Wall -O3 -g -Wl,-search_paths_first -headerpad_max_install_names -framework OpenGL -framework GLUT CMakeFiles/glview.dir/glview.c.o  -o glview  -L/Users/davidcox/Repositories/external/libfreenect/c/lib ../lib/libfreenect.a -lpthread /usr/local/lib/libusb-1.0.dylib 
